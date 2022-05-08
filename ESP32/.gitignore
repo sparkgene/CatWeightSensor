@@ -1,0 +1,5 @@
+.vscode
+certs
+.DS_Store
+app_config.h
+.pio
