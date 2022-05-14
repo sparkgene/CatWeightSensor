@@ -16,6 +16,7 @@ PubSubClient mqtt_client(https_client);
 // MQTT topic
 #define TOPIC_BASE "catsensor/"
 #define TOPIC_WEIGHT_DATA TOPIC_BASE "weight_data/" WEIGHT_DEVICE
+#define TOPIC_STATUS TOPIC_BASE "status/" WEIGHT_DEVICE
 
 
 // HX711 circuit wiring
@@ -32,7 +33,7 @@ PubSubClient mqtt_client(https_client);
 #define WEIGHT_PER_GRAM 419.527 // センサーのgあたりの数値
 #define TRIGGER_THRESHOLD_GRAMS 1000 // 猫が乗り降りしたと判断する重さ(gram)
 #define CALIBRATION_THRESHOLD_GRAMS 30 // キャリブレーションをやり直す重さ(gram)
-#define SESSION_DURATION_THRESHOLD 10 // seconds 体重判定のタイミング
+#define SESSION_DURATION_THRESHOLD 15 // seconds 体重判定のタイミング
 
 HX711 scale1;
 HX711 scale2;
@@ -45,6 +46,22 @@ bool calibration_complete = false; // キャリブレーション完了
 bool session_start = false; // トイレ開始
 int session_duration = 0; // トイレと判断したあとの継続時間
 float weigth_grams[SESSION_DURATION_THRESHOLD]; // トイレ中の重さを保存
+
+/**
+ * @send_status
+ * ステータスをAWS IoT Coreに送信する
+ * @param msg メッセージ
+ */
+void send_status(String message){
+    StaticJsonDocument<200> doc;
+    doc["message"] = message.c_str();
+    char jsonBuffer[512];
+    serializeJson(doc, jsonBuffer);
+
+    mqtt_client.publish(TOPIC_STATUS, jsonBuffer);
+    Serial.print("ステータス送信:");
+    Serial.println(jsonBuffer);
+}
 
 /**
  * Connect to WiFi access point
@@ -103,6 +120,8 @@ void connect_awsiot()
         Serial.println("Start MQTT connection...");
         if (mqtt_client.connect(AWS_IOT_THING_NAME)) {
             Serial.println("connected");
+            String status("connected");
+            send_status(status);
         }
         else {
             Serial.print("[WARNING] failed, rc=");
@@ -114,16 +133,12 @@ void connect_awsiot()
 }
 
 /**
- * Initial device setup
- **/
-void setup() {
-    Serial.begin(115200);
-
+ * @initialize_sensor
+ * センサーの初期化
+ */
+void initialize_sensor(){
     scale1.begin(LOADCELL_1_DOUT_PIN, LOADCELL_1_SCK_PIN);
     scale2.begin(LOADCELL_2_DOUT_PIN, LOADCELL_2_SCK_PIN);
-
-    connect_wifi();
-    init_mqtt();
 
     // initialize
     scale_calibration = 0;
@@ -132,16 +147,32 @@ void setup() {
 }
 
 /**
+ * Initial device setup
+ **/
+void setup() {
+    Serial.begin(115200);
+
+    initialize_sensor();
+
+    connect_wifi();
+    init_mqtt();
+}
+
+/**
  * @send_weight
  * 体重をAWS IoT Coreに送信する
  * @param weight 体重
  */
 void send_weight(float weight){
-    char msg[255];
-    sprintf(msg, "{\"weight\": %5.2f, \"device\":\"%s\"}", weight, WEIGHT_DEVICE);
-    mqtt_client.publish(TOPIC_WEIGHT_DATA, msg);
+
+    StaticJsonDocument<200> doc;
+    doc["weight"] = weight;
+    char jsonBuffer[512];
+    serializeJson(doc, jsonBuffer);
+
+    mqtt_client.publish(TOPIC_WEIGHT_DATA, jsonBuffer);
     Serial.print("メッセージ送信:");
-    Serial.println(msg);
+    Serial.println(jsonBuffer);
 }
 
 /**
@@ -174,7 +205,7 @@ float get_weight(float *weight){
 
     qsort(weight, sizeof(*weight) / sizeof(weight[0]), sizeof(float), sort_desc);
     float weight_total = 0.0;
-    for (int i = 2; i< 7; i++){
+    for (int i = 2; i< sizeof(*weight)-2; i++){
         weight_total = weight_total + weight[i];
     }
     return weight_total / 5;
@@ -257,11 +288,16 @@ void loop() {
                 Serial.print("キャリブレーション完了 基準重量:");
                 Serial.println(calibration_weight);
                 loop_interval = CALIBRATION_INTERVAL;
+                String status("calibration done.");
+                send_status(status);
             }
         }
     } else {
-        Serial.println("Scale not found.");
-    }
+        String status("Scale not found.");
+        Serial.println(status);
+        send_status(status);
+        initialize_sensor();
+   }
 
     delay(loop_interval);
 }
