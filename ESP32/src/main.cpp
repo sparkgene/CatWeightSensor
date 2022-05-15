@@ -33,7 +33,7 @@ PubSubClient mqtt_client(https_client);
 #define WEIGHT_PER_GRAM 419.527 // センサーのgあたりの数値
 #define TRIGGER_THRESHOLD_GRAMS 1000 // 猫が乗り降りしたと判断する重さ(gram)
 #define CALIBRATION_THRESHOLD_GRAMS 30 // キャリブレーションをやり直す重さ(gram)
-#define SESSION_DURATION_THRESHOLD 15 // seconds 体重判定のタイミング
+#define SESSION_DURATION_THRESHOLD 10 // seconds 体重判定のタイミング
 
 HX711 scale1;
 HX711 scale2;
@@ -46,6 +46,20 @@ bool calibration_complete = false; // キャリブレーション完了
 bool session_start = false; // トイレ開始
 int session_duration = 0; // トイレと判断したあとの継続時間
 float weigth_grams[SESSION_DURATION_THRESHOLD]; // トイレ中の重さを保存
+
+// watchdog timer
+// https://github.com/espressif/arduino-esp32/blob/master/libraries/ESP32/examples/Timer/WatchdogTimer/WatchdogTimer.ino
+const int wdtTimeout = 5000;  //time in ms to trigger the watchdog
+hw_timer_t *timer = NULL;
+
+/**
+ * @watchdog_reboot
+ * watch dog timer用リブート
+ */
+void IRAM_ATTR watchdog_reboot() {
+  ets_printf("watchdog reboot\n");
+  esp_restart();
+}
 
 /**
  * @send_status
@@ -152,6 +166,15 @@ void initialize_sensor(){
 void setup() {
     Serial.begin(115200);
 
+    // timerBegin(timer number, clock, count up)
+    timer = timerBegin(0, 80, true);
+    // timerAttachInterrupt(timer, callback function, edge trigger type)
+    timerAttachInterrupt(timer, &watchdog_reboot, true);
+    // timerAlarmWrite(timer, timeout in micro sec, auto reload)
+    timerAlarmWrite(timer, wdtTimeout * 1000, false);
+    // timerAlarmEnable(timer)
+    timerAlarmEnable(timer);
+
     initialize_sensor();
 
     connect_wifi();
@@ -197,21 +220,29 @@ int sort_desc(const void *p_n1, const void *p_n2) {
 /**
  * @get_weight
  * 飛び乗ったりすると、実際の体重より大きい数字となるので、
- * 最大の2値を除く5件の平均を体重とする
+ * 最大の2値を除く値の平均を体重とする
  * @param weight 体重の配列
  * @return 平均の体重
  */
 float get_weight(float *weight){
 
+    // 重い順にソート
     qsort(weight, sizeof(*weight) / sizeof(weight[0]), sizeof(float), sort_desc);
     float weight_total = 0.0;
-    for (int i = 2; i< sizeof(*weight)-2; i++){
-        weight_total = weight_total + weight[i];
+    int cnt = SESSION_DURATION_THRESHOLD - 2;
+    int weight_cnt = 0;
+    for (int i = 2; i < cnt; i++){
+        if(weight[i] > TRIGGER_THRESHOLD_GRAMS){
+            weight_total = weight_total + weight[i];
+            weight_cnt++;
+        }
     }
-    return weight_total / 5;
+    return weight_total / weight_cnt;
 }
 
 void loop() {
+    timerWrite(timer, 0); // reset timer (feed watchdog)
+    long loopTime = millis();
     loop_interval = DETECT_INTERVAL;
 
     connect_awsiot();
@@ -240,6 +271,7 @@ void loop() {
                 session_duration++;
                 if(session_duration > SESSION_DURATION_THRESHOLD){
                     float weight = get_weight(weigth_grams);
+                    Serial.println(weight);
                     if( weight > TRIGGER_THRESHOLD_GRAMS){
                         // 猫が乗ったと判断
                         Serial.print("体重:");
@@ -251,7 +283,7 @@ void loop() {
                         Serial.print("猫砂を追加しただけ:");
                         Serial.println(weight);
                     }
-                    // ベースラインを今の重さに変更
+                    // 一旦セッションを終了
                     session_start = false;
                     session_duration = 0;
                 }
@@ -267,7 +299,7 @@ void loop() {
                     if(calibration_reset_count > CALIBRATION_RESET_COUNT){
                         Serial.print("キャリブレーションやり直し diff:");
                         Serial.println(weight_diff);
-                        // 猫砂追加の可能性があるので、キャリブレーションをやり直し
+                        // 猫砂追加/掃除の可能性があるので、キャリブレーションをやり直し
                         calibration_count = 0;
                         scale_calibration = 0;
                         calibration_complete = false;
@@ -295,9 +327,9 @@ void loop() {
     } else {
         String status("Scale not found.");
         Serial.println(status);
-        send_status(status);
-        initialize_sensor();
    }
 
     delay(loop_interval);
+//    Serial.print("loop time is = ");
+//    Serial.println(millis() - loopTime); // should be under wdtTimeout
 }

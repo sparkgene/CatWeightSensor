@@ -106,6 +106,7 @@ export class CatSensorStack extends Stack {
     // AWS IoT Core LifeCycle Event to catch connect/disconnect
     new CfnTopicRule(this, 'CatSensorConnectionRule', {
       topicRulePayload: {
+        ruleDisabled: true,
         sql: "SELECT * FROM '$aws/events/presence/+/WeightMonitor'",
         actions: [
           {
