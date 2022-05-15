@@ -36,6 +36,17 @@ export class CatSensorStack extends Stack {
     })
     ioTRuleCWMetricsRole.attachInlinePolicy(ioTRuleCWMetricsPolicy)
 
+    // Action to CloudWatch Logs Role
+    const ioTStatusRuleActionToLogsRole = new Role(this, 'IoTStatusRuleActionToLogsRole', {
+      assumedBy: new ServicePrincipal('iot.amazonaws.com')
+    })
+
+    // Action destination Log Group
+    const ioTStatusRuleActionLogGroup = new LogGroup(this, 'IoTStatusRuleActionLogGroup', {
+      retention: RetentionDays.ONE_MONTH
+    })
+    ioTStatusRuleActionLogGroup.grantWrite(ioTStatusRuleActionToLogsRole)
+
     // Error Action to CloudWatch Logs Role
     const ioTRuleErrorActionToLogsRole = new Role(this, 'IoTRuleErrorActionToLogsRole', {
       assumedBy: new ServicePrincipal('iot.amazonaws.com')
@@ -66,11 +77,11 @@ export class CatSensorStack extends Stack {
     // Topic `catsensor/weight_data/#`
     new CfnTopicRule(this, 'CatSensorRule', {
       topicRulePayload: {
-        sql: "SELECT * FROM 'catsensor/weight_data/#'",
+        sql: "SELECT *, topic(3) as device FROM 'catsensor/weight_data/#'",
         actions: [
           {
             cloudwatchMetric: {
-              metricName: '${device}/weight',
+              metricName: 'topic(3)/weight',
               metricNamespace: 'CatSensor',
               metricUnit: 'None',
               metricValue: '${weight}',
@@ -92,14 +103,36 @@ export class CatSensorStack extends Stack {
       }
     })
 
-    // Topic `catsensor/weight_data/#`
+    // AWS IoT Core LifeCycle Event to catch connect/disconnect
     new CfnTopicRule(this, 'CatSensorConnectionRule', {
       topicRulePayload: {
+        ruleDisabled: true,
         sql: "SELECT * FROM '$aws/events/presence/+/WeightMonitor'",
         actions: [
           {
             lambda: {
               functionArn: lineNotifyFunction.functionArn
+            }
+          }
+        ],
+        errorAction: {
+          cloudwatchLogs: {
+            logGroupName: ioTRuleErrorActionLogGroup.logGroupName,
+            roleArn: ioTRuleErrorActionToLogsRole.roleArn
+          }
+        }
+      }
+    })
+
+    // device status rule
+    new CfnTopicRule(this, 'CatSensorStatusRule', {
+      topicRulePayload: {
+        sql: "SELECT *, topic(3) as device FROM 'catsensor/status/#'",
+        actions: [
+          {
+            cloudwatchLogs: {
+              logGroupName: ioTStatusRuleActionLogGroup.logGroupName,
+              roleArn: ioTStatusRuleActionToLogsRole.roleArn
             }
           }
         ],

@@ -16,6 +16,7 @@ PubSubClient mqtt_client(https_client);
 // MQTT topic
 #define TOPIC_BASE "catsensor/"
 #define TOPIC_WEIGHT_DATA TOPIC_BASE "weight_data/" WEIGHT_DEVICE
+#define TOPIC_STATUS TOPIC_BASE "status/" WEIGHT_DEVICE
 
 
 // HX711 circuit wiring
@@ -45,6 +46,36 @@ bool calibration_complete = false; // キャリブレーション完了
 bool session_start = false; // トイレ開始
 int session_duration = 0; // トイレと判断したあとの継続時間
 float weigth_grams[SESSION_DURATION_THRESHOLD]; // トイレ中の重さを保存
+
+// watchdog timer
+// https://github.com/espressif/arduino-esp32/blob/master/libraries/ESP32/examples/Timer/WatchdogTimer/WatchdogTimer.ino
+const int wdtTimeout = 5000;  //time in ms to trigger the watchdog
+hw_timer_t *timer = NULL;
+
+/**
+ * @watchdog_reboot
+ * watch dog timer用リブート
+ */
+void IRAM_ATTR watchdog_reboot() {
+  ets_printf("watchdog reboot\n");
+  esp_restart();
+}
+
+/**
+ * @send_status
+ * ステータスをAWS IoT Coreに送信する
+ * @param msg メッセージ
+ */
+void send_status(String message){
+    StaticJsonDocument<200> doc;
+    doc["message"] = message.c_str();
+    char jsonBuffer[512];
+    serializeJson(doc, jsonBuffer);
+
+    mqtt_client.publish(TOPIC_STATUS, jsonBuffer);
+    Serial.print("ステータス送信:");
+    Serial.println(jsonBuffer);
+}
 
 /**
  * Connect to WiFi access point
@@ -103,6 +134,8 @@ void connect_awsiot()
         Serial.println("Start MQTT connection...");
         if (mqtt_client.connect(AWS_IOT_THING_NAME)) {
             Serial.println("connected");
+            String status("connected");
+            send_status(status);
         }
         else {
             Serial.print("[WARNING] failed, rc=");
@@ -114,16 +147,12 @@ void connect_awsiot()
 }
 
 /**
- * Initial device setup
- **/
-void setup() {
-    Serial.begin(115200);
-
+ * @initialize_sensor
+ * センサーの初期化
+ */
+void initialize_sensor(){
     scale1.begin(LOADCELL_1_DOUT_PIN, LOADCELL_1_SCK_PIN);
     scale2.begin(LOADCELL_2_DOUT_PIN, LOADCELL_2_SCK_PIN);
-
-    connect_wifi();
-    init_mqtt();
 
     // initialize
     scale_calibration = 0;
@@ -132,16 +161,41 @@ void setup() {
 }
 
 /**
+ * Initial device setup
+ **/
+void setup() {
+    Serial.begin(115200);
+
+    // timerBegin(timer number, clock, count up)
+    timer = timerBegin(0, 80, true);
+    // timerAttachInterrupt(timer, callback function, edge trigger type)
+    timerAttachInterrupt(timer, &watchdog_reboot, true);
+    // timerAlarmWrite(timer, timeout in micro sec, auto reload)
+    timerAlarmWrite(timer, wdtTimeout * 1000, false);
+    // timerAlarmEnable(timer)
+    timerAlarmEnable(timer);
+
+    initialize_sensor();
+
+    connect_wifi();
+    init_mqtt();
+}
+
+/**
  * @send_weight
  * 体重をAWS IoT Coreに送信する
  * @param weight 体重
  */
 void send_weight(float weight){
-    char msg[255];
-    sprintf(msg, "{\"weight\": %5.2f, \"device\":\"%s\"}", weight, WEIGHT_DEVICE);
-    mqtt_client.publish(TOPIC_WEIGHT_DATA, msg);
+
+    StaticJsonDocument<200> doc;
+    doc["weight"] = weight;
+    char jsonBuffer[512];
+    serializeJson(doc, jsonBuffer);
+
+    mqtt_client.publish(TOPIC_WEIGHT_DATA, jsonBuffer);
     Serial.print("メッセージ送信:");
-    Serial.println(msg);
+    Serial.println(jsonBuffer);
 }
 
 /**
@@ -166,21 +220,29 @@ int sort_desc(const void *p_n1, const void *p_n2) {
 /**
  * @get_weight
  * 飛び乗ったりすると、実際の体重より大きい数字となるので、
- * 最大の2値を除く5件の平均を体重とする
+ * 最大の2値を除く値の平均を体重とする
  * @param weight 体重の配列
  * @return 平均の体重
  */
 float get_weight(float *weight){
 
+    // 重い順にソート
     qsort(weight, sizeof(*weight) / sizeof(weight[0]), sizeof(float), sort_desc);
     float weight_total = 0.0;
-    for (int i = 2; i< 7; i++){
-        weight_total = weight_total + weight[i];
+    int cnt = SESSION_DURATION_THRESHOLD - 2;
+    int weight_cnt = 0;
+    for (int i = 2; i < cnt; i++){
+        if(weight[i] > TRIGGER_THRESHOLD_GRAMS){
+            weight_total = weight_total + weight[i];
+            weight_cnt++;
+        }
     }
-    return weight_total / 5;
+    return weight_total / weight_cnt;
 }
 
 void loop() {
+    timerWrite(timer, 0); // reset timer (feed watchdog)
+    long loopTime = millis();
     loop_interval = DETECT_INTERVAL;
 
     connect_awsiot();
@@ -209,6 +271,7 @@ void loop() {
                 session_duration++;
                 if(session_duration > SESSION_DURATION_THRESHOLD){
                     float weight = get_weight(weigth_grams);
+                    Serial.println(weight);
                     if( weight > TRIGGER_THRESHOLD_GRAMS){
                         // 猫が乗ったと判断
                         Serial.print("体重:");
@@ -220,7 +283,7 @@ void loop() {
                         Serial.print("猫砂を追加しただけ:");
                         Serial.println(weight);
                     }
-                    // ベースラインを今の重さに変更
+                    // 一旦セッションを終了
                     session_start = false;
                     session_duration = 0;
                 }
@@ -236,7 +299,7 @@ void loop() {
                     if(calibration_reset_count > CALIBRATION_RESET_COUNT){
                         Serial.print("キャリブレーションやり直し diff:");
                         Serial.println(weight_diff);
-                        // 猫砂追加の可能性があるので、キャリブレーションをやり直し
+                        // 猫砂追加/掃除の可能性があるので、キャリブレーションをやり直し
                         calibration_count = 0;
                         scale_calibration = 0;
                         calibration_complete = false;
@@ -257,11 +320,16 @@ void loop() {
                 Serial.print("キャリブレーション完了 基準重量:");
                 Serial.println(calibration_weight);
                 loop_interval = CALIBRATION_INTERVAL;
+                String status("calibration done.");
+                send_status(status);
             }
         }
     } else {
-        Serial.println("Scale not found.");
-    }
+        String status("Scale not found.");
+        Serial.println(status);
+   }
 
     delay(loop_interval);
+//    Serial.print("loop time is = ");
+//    Serial.println(millis() - loopTime); // should be under wdtTimeout
 }
