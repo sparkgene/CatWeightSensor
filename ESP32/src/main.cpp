@@ -31,7 +31,7 @@ PubSubClient mqtt_client(https_client);
 #define CALIBRATION_TIMES 5 // キャリブレーションの回数
 #define CALIBRATION_RESET_COUNT 5 // 再キャリブレーションを実行すると判断する回数
 #define WEIGHT_PER_GRAM 419.527 // センサーのgあたりの数値
-#define TRIGGER_THRESHOLD_GRAMS 1000 // 猫が乗り降りしたと判断する重さ(gram)
+#define TRIGGER_THRESHOLD_GRAMS 3000 // 猫が乗り降りしたと判断する重さ(gram)
 #define CALIBRATION_THRESHOLD_GRAMS 30 // キャリブレーションをやり直す重さ(gram)
 #define SESSION_DURATION_THRESHOLD 20 // seconds 体重判定のタイミング
 
