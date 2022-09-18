@@ -1,6 +1,16 @@
-import { SecretValue, Stack, StackProps } from 'aws-cdk-lib'
+import { Stack, StackProps, Duration } from 'aws-cdk-lib'
 import { Construct } from 'constructs'
-import { Role, ServicePrincipal, Policy, PolicyStatement, Effect } from 'aws-cdk-lib/aws-iam'
+import { Role, ServicePrincipal, Policy, PolicyStatement, Effect, ManagedPolicy } from 'aws-cdk-lib/aws-iam'
+import {
+  Dashboard,
+  TextWidget,
+  GraphWidget,
+  Metric,
+  Statistic,
+  Row,
+  Column,
+  SingleValueWidget
+} from 'aws-cdk-lib/aws-cloudwatch'
 import { CfnTopicRule } from 'aws-cdk-lib/aws-iot'
 import { LogGroup, RetentionDays } from 'aws-cdk-lib/aws-logs'
 import { Function, Runtime, Code } from 'aws-cdk-lib/aws-lambda'
@@ -51,6 +61,16 @@ export class CatSensorStack extends Stack {
     const ioTRuleErrorActionToLogsRole = new Role(this, 'IoTRuleErrorActionToLogsRole', {
       assumedBy: new ServicePrincipal('iot.amazonaws.com')
     })
+    const ioTRuleErrorActionToLogsPolicy = new ManagedPolicy(this, 'IoTRuleErrorActionToLogsPolicy', {
+      statements: [
+        new PolicyStatement({
+          actions: ['logs:DescribeLogStreams'],
+          effect: Effect.ALLOW,
+          resources: ['*']
+        })
+      ]
+    })
+    ioTRuleErrorActionToLogsPolicy.attachToRole(ioTRuleErrorActionToLogsRole)
 
     // Error Action destination Log Group
     const ioTRuleErrorActionLogGroup = new LogGroup(this, 'IoTRuleErrorActionLogGroup', {
@@ -81,7 +101,7 @@ export class CatSensorStack extends Stack {
         actions: [
           {
             cloudwatchMetric: {
-              metricName: 'topic(3)/weight',
+              metricName: '${topic(3)}/weight',
               metricNamespace: 'CatSensor',
               metricUnit: 'None',
               metricValue: '${weight}',
@@ -144,5 +164,59 @@ export class CatSensorStack extends Stack {
         }
       }
     })
+
+    ////////////////////////////////////////////
+    // 体重の dashboard
+
+    //Create CloudWatch Dashboard
+    const MochiDashboard = new Dashboard(this, 'MochiDashboard', {
+      dashboardName: 'MochiWeight'
+    })
+
+    // タイトル
+    MochiDashboard.addWidgets(
+      new TextWidget({
+        markdown: '# モチの体重',
+        height: 2,
+        width: 20
+      })
+    )
+
+    MochiDashboard.addWidgets(
+      new Row(
+        new Column(
+          new SingleValueWidget({
+            metrics: [
+              new Metric({
+                metricName: 'WeightMonitor/weight',
+                namespace: 'CatSensor',
+                statistic: Statistic.AVERAGE,
+                label: 'weight',
+                period: Duration.days(1)
+              })
+            ],
+            height: 4,
+            width: 5
+          }),
+          new GraphWidget({
+            leftYAxis: {
+              showUnits: false,
+              min: 3500,
+              max: 5000
+            },
+            left: [
+              new Metric({
+                metricName: 'WeightMonitor/weight',
+                namespace: 'CatSensor',
+                statistic: Statistic.AVERAGE,
+                label: 'weight',
+                period: Duration.minutes(1)
+              })
+            ],
+            width: 15
+          })
+        )
+      )
+    )
   }
 }
